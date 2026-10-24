@@ -1,0 +1,2 @@
+class XsError(Exception):
+    pass
