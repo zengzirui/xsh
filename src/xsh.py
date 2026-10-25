@@ -412,10 +412,6 @@ def echo(stdin, sh: Xsh, string=""):
     sh.out(string+"\n")
     return 0
 
-@command
-def kk(sh):
-    sh.out((1, 11))
-    return 0
 
 @command
 def upper(stdin, sh: Xsh):
