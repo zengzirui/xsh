@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.text import Text
 import locale
+import shutil
 
 import promptplus
 
@@ -28,7 +29,7 @@ try:
 except ImportError:
     class XsError(Exception): pass
 
-# ---------------- 路径与日志初始化 ----------------
+# ---------------- Path & Logging Initialization ----------------
 if getattr(sys, "frozen", False):
     PROJECTDIR = pathlib.Path(sys.executable).parent
 else:
@@ -49,15 +50,16 @@ _sh_ = None
 def get_sh():
     return _sh_
 
-# ---------------- 自定义参数解析（完美处理双引号/单引号空格） ----------------
+# ---------------- Custom Argument Parser ----------------
 def parse_args(cmd_str):
-    """手搓解析器：按空格拆分，但完全忽略双引号/单引号内部的空格"""
+    """Custom parser: splits by spaces, ignores spaces inside quotes, supports # comments"""
+    cmd_str = cmd_str.split("#")[0]
     args = []
     current_arg = ""
     in_quotes = False
     for char in cmd_str:
         if char in ('"', "'"):
-            in_quotes = not in_quotes # 遇到引号就切换状态
+            in_quotes = not in_quotes
         elif char == ' ' and not in_quotes:
             if current_arg:
                 args.append(current_arg)
@@ -68,9 +70,8 @@ def parse_args(cmd_str):
         args.append(current_arg)
     return args
 
-# ---------------- 命令注册装饰器 ----------------
+# ---------------- Command Registration Decorator ----------------
 def command(arg=None, help=""):
-    """兼容 @command 和 @command(help='xxx') 两种写法"""
     def decorator(func):
         cmd = Command(func, help)
         if isinstance(arg, list):
@@ -83,7 +84,7 @@ def command(arg=None, help=""):
         return decorator(arg)
     return decorator
 
-# ---------------- 命令类 ----------------
+# ---------------- Command Class ----------------
 class Command:
     def __init__(self, func, help_text=""):
         self.name = func.__name__
@@ -98,7 +99,7 @@ class Command:
 
     def lexArgs(self, string):
         args = {}
-        commandlist = string.split()[1:]
+        commandlist = parse_args(string)[1:]
         positional = []
         idx = 0
         no_look = False
@@ -142,25 +143,19 @@ class Command:
                 missing.append(name)
                 
         if missing:
-            raise XsError(f"{self.name}: 缺少必填参数 {missing}")
+            raise XsError(f"{self.name}: Missing required arguments {missing}")
             
         return self.func(**args)
 
-# ---------------- Prompt 类 (Catppuccin 彩虹渐变色) ----------------
+# ---------------- Prompt Class (Catppuccin) ----------------
 class Prompt:
     def __init__(self):
         self.console = Console(force_terminal=True, color_system="truecolor")
-        
         self.C = {
-            "red": "#f38ba8",
-            "peach": "#fab387",
-            "yellow": "#f9e2af",
-            "green": "#a6e3a1",
-            "sapphire": "#74c7ec",
-            "lavender": "#b4befe",
+            "red": "#f38ba8", "peach": "#fab387", "yellow": "#f9e2af",
+            "green": "#a6e3a1", "sapphire": "#74c7ec", "lavender": "#b4befe",
             "crust": "#11111b",
         }
-        
         self.left_round = ""
         self.right_round = ""
         self.arrow = ""
@@ -197,35 +192,28 @@ class Prompt:
         conda_env = os.environ.get("CONDA_DEFAULT_ENV")
         now = datetime.datetime.now().strftime("%H:%M")
 
-        # 1. 用户 (红) & 左圆角
         text.append(self.left_round, style=self.C["red"])
         text.append(f"  {user} ", style=f"bold {self.C['crust']} on {self.C['red']}")
         
-        # 2. 路径 (桃红)
         text.append(self.arrow, style=f"{self.C['red']} on {self.C['peach']}")
         text.append(f" {cwd} ", style=f"bold {self.C['crust']} on {self.C['peach']}")
         
-        # 3. Git 模块 (黄)
         text.append(self.arrow, style=f"{self.C['peach']} on {self.C['yellow']}")
         if git_branch:
             text.append(f"  {git_branch} ", style=f"bold {self.C['crust']} on {self.C['yellow']}")
             
-        # 4. Python 模块 (绿)
         text.append(self.arrow, style=f"{self.C['yellow']} on {self.C['green']}")
         if py_ver:
             text.append(f"  {py_ver} ", style=f"bold {self.C['crust']} on {self.C['green']}")
             
-        # 5. Conda 模块 (青)
         text.append(self.arrow, style=f"{self.C['green']} on {self.C['sapphire']}")
         if conda_env:
             text.append(f"  {conda_env} ", style=f"bold {self.C['crust']} on {self.C['sapphire']}")
             
-        # 6. 时间 (紫) & 右圆角
         text.append(self.arrow, style=f"{self.C['sapphire']} on {self.C['lavender']}")
         text.append(f"  {now} ", style=f"bold {self.C['crust']} on {self.C['lavender']}")
         text.append(self.right_round, style=self.C['lavender'])
 
-        # 最后的 ❯
         char_color = self.C["green"] if status == 0 else self.C["red"]
         text.append(" ❯ ", style=f"bold {char_color}")
 
@@ -233,14 +221,13 @@ class Prompt:
             self.console.print(text, end="")
         return capture.get()
 
-# ---------------- Shell 核心类 ----------------
+# ---------------- Shell Core Class ----------------
 class Xsh:
     def __init__(self):
         self.log = loguru.logger
         self.commands = {}
         self._local = threading.local()
         self.status = 0
-        self.last=""
         self.prompt_engine = Prompt()
 
     def out(self, data, on_stdout: str | SentinelValue = donot_have_sentinel, not_data_str: str | SentinelValue = donot_have_sentinel):
@@ -253,6 +240,49 @@ class Xsh:
         if not target:
             sys.stdout.write(on_stdout if on_stdout is not donot_have_sentinel else str(data))
             sys.stdout.flush()
+
+    def check_command_exists(self, name: str) -> bool:
+        """Check if command exists internally or externally"""
+        if name in self.commands:
+            return True
+        if shutil.which(name):
+            return True
+        return False
+
+    def load_rc(self):
+        rc_paths = [
+            pathlib.Path(os.path.expanduser("~/.xshrc")), 
+            pathlib.Path(".xshrc")                        
+        ]
+        
+        for rc_path in rc_paths:
+            if not rc_path.exists():
+                self.log.debug(f"Skipped rc file (not found): {rc_path.absolute()}")
+                continue
+                
+            self.log.info(f"Loading rc file: {rc_path.absolute()}")
+            loguru.logger.complete()
+            
+            try:
+                with open(rc_path, "r", encoding="utf-8-sig") as f:
+                    for line_num, line in enumerate(f, 1):
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                            
+                        if line.startswith("export "):
+                            var_def = line[7:].strip()
+                            if "=" in var_def:
+                                k, v = var_def.split("=", 1)
+                                os.environ[k.strip()] = v.strip("'\"")
+                                continue
+                        
+                        try:
+                            self.run_command(line)
+                        except Exception as e:
+                            self.log.exception(f"[xshrc Error] Failed at line {line_num}: {line}")
+            except Exception as e:
+                self.log.exception(f"[Read Error] {rc_path}")
 
     def run_command(self, command: str):
         if "|" in command:
@@ -288,7 +318,6 @@ class Xsh:
                             p_stdin = subprocess.PIPE if in_q else None
                             p_stdout = None if is_last else subprocess.PIPE
                             
-                            # 💡 管道里使用 parse_args
                             parts = parse_args(commandlist[i])
                             
                             p = subprocess.Popen(
@@ -324,14 +353,14 @@ class Xsh:
                             p.wait() 
                                 
                         except FileNotFoundError:
-                            print(f"command not found: {commandlist[i]}")
+                            self.log.error(f"Command not found: {commandlist[i]}")
+                            print(f"Command not found: {commandlist[i]}")  # English UI
                         except Exception as e:
-                            print(f"[外部命令崩溃] {e}")
+                            self.log.exception(f"[External Command Crash] {commandlist[i]}")
+                            print(f"[External Command Crash] {commandlist[i]}")  # English UI
                         
                 except Exception as e:
-                    print(f"\n[线程崩溃] {commandlist[i]} : {e}")
-                    import traceback
-                    traceback.print_exc()
+                    self.log.exception(f"[Thread Crash] {commandlist[i]}")
                 finally:
                     if not is_last: 
                         out_q.put(None)
@@ -341,7 +370,6 @@ class Xsh:
                     e.submit(worker, i)
                     
         else:
-            # 单条命令
             self.log.info(f"Running command: {command}")
             tokens = command.split()
             if tokens:
@@ -350,14 +378,15 @@ class Xsh:
                     return self.commands[name](command, sh_instance=self)
                 else:
                     try:
-                        # 💡 单条命令使用 parse_args
                         parts = parse_args(command)
                         res = subprocess.run(parts, shell=False, encoding=sys_encoding).returncode
                     except FileNotFoundError:
-                        print(f"command not found: {name}")
+                        self.log.error(f"Command not found: {name}")
+                        print(f"Command not found: {name}")  # English UI
                         res = 1
                     except Exception as e:
-                        print(f"[外部命令崩溃] {e}")
+                        self.log.exception(f"[External Command Crash] {command}")
+                        print(f"[External Command Crash] {command}")  # English UI
                         res = 1
                     return res
             return 0
@@ -365,13 +394,21 @@ class Xsh:
     def run(self):
         global _sh_
         _sh_ = self
-
+        
+        self.load_rc()
+        
         his = promptplus.History(os.path.expanduser("~/.xsh_history"))
 
         while True:
             try:
                 prompt_str = self.prompt_engine.render(self.status)
-                command = promptplus.prompt(prompt_str, his, os.getcwd())
+                
+                command = promptplus.prompt(
+                    prompt_str, 
+                    his, 
+                    os.getcwd(), 
+                    check_cmd_func=self.check_command_exists
+                )
                 
                 if command.strip():
                     self.status = self.run_command(command)
@@ -379,7 +416,7 @@ class Xsh:
                     self.status = 0
                     
             except FileNotFoundError:
-                print("command not found")
+                self.log.error("FileNotFoundError in run loop")
             except KeyboardInterrupt:
                 sys.stdout.write("\033[0m\n")
                 sys.stdout.flush()
@@ -388,10 +425,12 @@ class Xsh:
                 sys.stdout.write("\033[0m\n")
                 sys.stdout.flush()
                 break
-            except XsError as e:
-                print(f"Error: {e}")
+            except Exception as e:
+                self.log.exception("[Fatal Crash in Main Loop]")
+                print(f"\n[Internal System Error, please check logs]")  # English UI
+                sys.stdout.flush()
 
-# ---------------- 内置命令实现 ----------------
+# ---------------- Built-in Commands ----------------
 xsh = Xsh()
 _sh_ = xsh
 
@@ -409,9 +448,13 @@ def cat(stdin, sh):
 
 @command
 def echo(stdin, sh: Xsh, string=""):
-    sh.out(string+"\n")
+    sh.out(string + "\n")
     return 0
 
+@command
+def kk(sh):
+    sh.out((1, 11))
+    return 0
 
 @command
 def upper(stdin, sh: Xsh):
@@ -424,7 +467,11 @@ def upper(stdin, sh: Xsh):
 def cd(path):
     if path.endswith(":"):
         path += "\\"
-    os.chdir(path)
+    path = os.path.expanduser(path)
+    try:
+        os.chdir(path)
+    except FileNotFoundError:
+        print(f"cd: No such file or directory '{path}'")  # English UI
     return 0
 
 @command
